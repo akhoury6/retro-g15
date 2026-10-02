@@ -1261,7 +1261,7 @@ class Processor {
         remainder in PN. This command must be coded as immediate and be in an
         odd location so that transfer starts on an even word. The C (characteristic)
         must be 1 and C1 (double-precision bit) is ignored. T for single-precision
-        operands in PN and ID should normally be 57 and for double-precision 114,
+        operands in PN and ID should normally be 57 and for double-precision 116,
         although other values can be useful. Sign of the quotient is maintained
         in the IP flip-flop, which is not used here. See Theory of Operation, p.55-59 */
         let count = this.T.value;       // shift+add iteration count times 2
