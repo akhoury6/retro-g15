@@ -1549,7 +1549,11 @@ class Processor {
         if ((this.OC.value & 0b01100) != 0b01100) {
             eob = 1;                            // canceled or not SLOW IN
         } else {
+            // receiveInputCode begins at the accepted E pulse: the input
+            // synchronizer has reset OF1/OF2 (TOO F4e-g, dwg 48).
+            this.drum.OF.value &= 1;
             if (code & IOCodes.ioDataMask) {    // it's a data frame
+                this.drum.OF.value = 0;         // four-bit precession: OF3 reset
                 await this.drum.ioStart("RIC data");
                 marker = await this.drum.ioPrecessCodeTo23(code, 4);
                 this.drum.ioStop("RIC data");
@@ -1560,6 +1564,7 @@ class Processor {
                     break;
                 case IOCodes.ioCodeCR:          // carriage return: shift sign into word
                 case IOCodes.ioCodeTab:         // tab: shift sign into word
+                    this.drum.OF.value = 1;     // one-bit precession: OF3 set
                     await this.drum.ioStart("RIC CR/TAB");
                     marker = await this.drum.ioPrecessCodeTo23(this.OS.value, 1);
                     this.drum.ioStop("RIC CR/TAB");
@@ -1580,6 +1585,7 @@ class Processor {
                 case IOCodes.ioCodePeriod:      // period: ignored
                     break;
                 case IOCodes.ioCodeWait:        // wait: insert a 0 digit on input
+                    this.drum.OF.value = 0;     // four-bit precession: OF3 reset
                     await this.drum.ioStart("RIC Period/Wait");
                     marker = await this.drum.ioPrecessCodeTo23(0, 4);
                     this.drum.ioStop("RIC Period/Wait");
@@ -1850,6 +1856,7 @@ class Processor {
                             punching = false;
                         } else {
                             code = IOCodes.ioCodeReload;
+                            this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
                         }
                         break;
                     }
@@ -1897,6 +1904,9 @@ class Processor {
 
         // Initial 1 drum-cycle delay, Typewriter only, see TOO drawing 55
         await this.drum.ioWaitFor(Util.longLineSize);
+        if (!this.canceledIO) {
+            this.drum.OF.value |= 1;    // initial TYPE delay sets OF3 (dwg 55)
+        }
 
         // Start a MZ reload cycle.
         do {
@@ -1961,10 +1971,15 @@ class Processor {
                 // Pause printing while the ENABLE switch is on
                 while (this.enableSwitch && !this.canceledIO) {
                     await this.drum.ioWaitFor(Util.longLineSize);       // idle for a drum cycle
+                    if (!this.canceledIO) this.drum.OF.value |= 1; // TYPE delay still sets OF3
                 }
 
                 if (!this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize*2);         // delay two extra drum cycles
+                    await this.drum.ioWaitFor(Util.longLineSize);
+                    if (!this.canceledIO) {
+                        this.drum.OF.value |= 1; // TYPE feedback delay sets OF3 (F8u)
+                        await this.drum.ioWaitFor(Util.longLineSize);
+                    }
                 }
 
                 if (this.canceledIO) {
@@ -2010,6 +2025,9 @@ class Processor {
 
         // Initial 1 drum-cycle delay, Typewriter only, see TOO drawing 55
         await this.drum.ioWaitFor(Util.longLineSize);
+        if (!this.canceledIO) {
+            this.drum.OF.value |= 1;    // initial TYPE delay sets OF3 (dwg 55)
+        }
 
         // Start a MZ reload cycle.
         do {
@@ -2065,6 +2083,7 @@ class Processor {
                             printing = false;
                         } else {
                             code = IOCodes.ioCodeReload;
+                            this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
                         }
                         break;
                     case IOCodes.ioCodePeriod:
@@ -2079,10 +2098,15 @@ class Processor {
                 // Pause printing while the ENABLE switch is on
                 while (this.enableSwitch && !this.canceledIO) {
                     await this.drum.ioWaitFor(Util.longLineSize);       // idle for a drum cycle
+                    if (!this.canceledIO) this.drum.OF.value |= 1; // TYPE delay still sets OF3
                 }
 
                 if (!this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize*2);         // delay two extra drum cycles
+                    await this.drum.ioWaitFor(Util.longLineSize);
+                    if (!this.canceledIO) {
+                        this.drum.OF.value |= 1; // TYPE feedback delay sets OF3 (F8u)
+                        await this.drum.ioWaitFor(Util.longLineSize);
+                    }
                 }
 
                 if (this.canceledIO) {
@@ -2223,6 +2247,7 @@ class Processor {
 
         this.slowOutputODUntil = 0;
         this.OC.value = IOCodes.ioCmdReady;     // set I/O Ready state
+        this.drum.OF.value &= 0b101;     // READY resets OF2, not OF1/OF3 (dwg 52)
         this.AS.value = 0;
         this.OS.value = 0;
         this.canceledIO = false;

@@ -20,7 +20,7 @@ for (const start of [0, 1, 107]) {
             assert.equal(drum.MZ[0] & 1, bit, 'MZ00 T1 must retain its own original value');
             assert.equal(code, src[3] >>> 26, 'high format code remains unchanged');
             for (let i = 0; i < 4; i++) {
-                const expected = ((src[i] << 3) & Util.wordMask) | (i ? src[i-1] >>> 26 : bit);
+                const expected = (((src[i] & (i ? Util.wordMask : Util.wordMask & ~1)) << 3) & Util.wordMask) | (i ? src[i-1] >>> 26 : bit);
                 assert.equal(drum.MZ[i], expected, `format shift word ${i}`);
             }
             assert.deepEqual(Array.from(drum.line[2].slice(0, 4)), originalLine, 'format source is nondestructive');
