@@ -8,7 +8,7 @@ let cases=0;
 for (const operation of ['typeAR','typeLine19','punchLine19']) {
     // Typewriter's initial delay puts format at time216; punch format at108.
     const formatTime=operation==='punchLine19'?108:216;
-    for (const cancelAt of [103,formatTime+1,formatTime+107,formatTime+109]) {
+    for (const cancelAt of [103,formatTime+1,formatTime+107,formatTime+109,formatTime+215,formatTime+217]) {
         for (const mz of [[0,0,0,0],[2,4,6,8]]) {
             const p=new Processor({config:{getNode:()=>false}});
             const d=p.drum;
@@ -35,7 +35,7 @@ for (const operation of ['typeAR','typeLine19','punchLine19']) {
             p.finishIO=()=>{finish();if(p.OC.value===16)readyTime=d.drumTime;};
             await p[operation]();
             while(d.ioActive) await new Promise(resolve=>setImmediate(resolve));
-            const precess=operation!=='typeAR'||cancelAt<formatTime+108;
+            const precess=operation!=='typeAR'||cancelAt<formatTime+216;
             assert.ok(captured);
             const label=`${operation} cancel=${cancelAt}, MZ=${mz}`;
             assert.deepEqual(Array.from(d.line[19]),precess?
@@ -46,7 +46,7 @@ for (const operation of ['typeAR','typeLine19','punchLine19']) {
             }
             assert.equal(p.OC.value,16,label);
             // Punch emits its documented initial SPACE; cancellation emits no data.
-            assert.equal(output.length,operation==='punchLine19'?1:0,label);
+            assert.equal(output.length,operation==='punchLine19'?(cancelAt>formatTime+216?2:1):0,label);
             ++cases;
         }
     }

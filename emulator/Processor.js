@@ -106,7 +106,8 @@ class Processor {
         this.activeIODevice = null;                     // current I/O device object
         this.canceledIO = false;                        // current I/O has been canceled
         this.setReadyPrecession = false;                // SET READY will precess line 19
-        this.slowOutputODUntil = 0;                     // OD remains set until format-cycle ending T0
+        this.slowOutputODUntil = 0;                     // OD remains set until data-cycle ending T0
+        this.slowOutputNextF = 0;                       // next end-of-data T0
         this.duplicateIO = false;                       // second I/O of same type initiated while first in progress
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
@@ -1744,6 +1745,10 @@ class Processor {
         let code = 0;                   // I/O code for the device
         let zeroed = false;             // precessor function reports line 19 all zeroes
 
+        // Format occupies one cycle; every data/nondata action occupies the
+        // following full cycle (F-8u/v, dwgs 52, 55), including one-word AR.
+        await this.drum.ioWaitUntil(0);
+        const dataEnd = this.drum.drumTime + Util.longLineSize;
         switch (fmt) {
         case 0b000:     // digit
             [code, zeroed] = await precessor(4);
@@ -1795,6 +1800,11 @@ class Processor {
             break;
         }
 
+        await this.drum.ioWaitFor(Math.max(0, dataEnd-this.drum.drumTime));
+        if (!this.canceledIO) {
+            // F=T0·OE resets OD unless [RELOAD]OF sets it at the same F.
+            this.slowOutputODUntil = fmt == 0b101 ? Infinity : 0;
+        }
         return [code, zeroed];
     }
 
@@ -1832,11 +1842,13 @@ class Processor {
             // for proper timing.
             do {
                 if (!this.canceledIO) {
+                    this.slowOutputNextF = this.drum.drumTime +
+                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                     if (reloadMZ) {
                         reloadMZ = false;
-                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
                         this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
+                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -1857,6 +1869,7 @@ class Processor {
                         } else {
                             code = IOCodes.ioCodeReload;
                             this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
+                            this.slowOutputODUntil = Infinity; // [RELOAD]OF·F sets OD
                         }
                         break;
                     }
@@ -1922,11 +1935,13 @@ class Processor {
             // will take four drum cycles for proper timing.
             do {
                 if (!this.canceledIO) {
+                    this.slowOutputNextF = this.drum.drumTime +
+                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                     if (reloadMZ) {
                         reloadMZ = false;
-                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
                         this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
+                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(3, 3);  // get initial format code for AR
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -2043,11 +2058,13 @@ class Processor {
             // will take four drum cycles for proper timing.
             do {
                 if (!this.canceledIO) {
+                    this.slowOutputNextF = this.drum.drumTime +
+                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                     if (reloadMZ) {
                         reloadMZ = false;
-                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
                         this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
+                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -2084,6 +2101,7 @@ class Processor {
                         } else {
                             code = IOCodes.ioCodeReload;
                             this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
+                            this.slowOutputODUntil = Infinity; // [RELOAD]OF·F sets OD
                         }
                         break;
                     case IOCodes.ioCodePeriod:
@@ -2279,6 +2297,12 @@ class Processor {
             if (this.OC.value == sCode) {
                 this.warning(`>>Duplicate IO OC=${this.OC.value.toString(2)}, S=${sCode.toString(2)}`);
                 this.duplicateIO = true;        // same I/O as the one in progress, so signal the device
+                if (sCode >= IOCodes.ioCmdTypeAR && sCode <= IOCodes.ioCmdPunch19) {
+                    // DS·S2 sets OD even when OC is unchanged; the next F
+                    // still resets it unless the current format requests RELOAD.
+                    this.slowOutputODUntil = this.slowOutputNextF > this.drum.drumTime ?
+                            this.slowOutputNextF : Infinity;
+                }
             } else {
                 this.warning(`>>InitiateIO with I/O active: S=${sCode.toString(2)}, OC=${this.OC.value.toString(2)}`);
                 sCode |= this.OC.value;         // S is always OR-ed into OC, not copied
