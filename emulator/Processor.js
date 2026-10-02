@@ -2291,6 +2291,26 @@ class Processor {
     async initiateIO(sCode) {
         /* Initiates the I/O operation specified by sCode */
 
+        // OC has set-only command gates (TOO drawing 45). In particular,
+        // Memo 99 starts automatic TYPE IN, then selects the photo reader
+        // with C0 S15 without a Ready interval or a fresh line-23 marker.
+        // Restrict this handoff to modeled input devices and C0 requests;
+        // busy C1 initialization needs synchronization with an input frame.
+        if (!this.C1.value && !this.canceledIO &&
+                (this.OC.value == IOCodes.ioCmdTypeIn || this.OC.value == IOCodes.ioCmdPTRead) &&
+                (sCode == IOCodes.ioCmdTypeIn || sCode == IOCodes.ioCmdPTRead)) {
+            const priorCode = this.OC.value;
+            this.OC.value |= sCode;
+            if (priorCode == IOCodes.ioCmdTypeIn && this.OC.value == IOCodes.ioCmdPTRead) {
+                // Change OC before cancel(): Typewriter's cancelTypeIn callback
+                // must not finish the input and clear AS, OS, or pending state.
+                this.devices.typewriter.cancel();
+                this.readPaperTape();          // async -- one reader operation
+            }
+            await this.transferDriver(this.transferNothing);
+            return;
+        }
+
         // If an I/O is already in progress and this is neither a cancel request
         // nor the same I/O code, cancel the I/O.
         if (this.OC.value != IOCodes.ioCmdReady && sCode != IOCodes.ioCmdCancel) {
