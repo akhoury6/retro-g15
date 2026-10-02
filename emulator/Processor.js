@@ -110,6 +110,7 @@ class Processor {
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
         this.ioPrecession = Promise.resolve();          // Promise for I/O line 19 precession
+        this.ioAutoReloadInit = Promise.resolve();      // Promise for line 23 auto-reload initialization
 
         // Bound methods
         this.boundIOPrecess19ToCode = this.drum.ioPrecess19ToCode.bind(this.drum);
@@ -1521,6 +1522,8 @@ class Processor {
         let eob = 0;                    // end-of-block flag
         let marker = 0;                 // auto-reload marker code
 
+        await this.ioAutoReloadInit;    // line 23 auto-reload initialization must finish first
+
         if ((this.OC.value & 0b01100) != 0b01100) {
             eob = 1;                            // canceled or not SLOW IN
         } else {
@@ -2229,9 +2232,16 @@ class Processor {
         if (this.C1.value) {
             this.AS.value = 1;          // set automatic line 23 reload
             if ((sCode & 0b1100) == 0b1100) {   // SLOW IN commands
-                await this.drum.ioStart("INIT AUTO RELOAD");
-                await this.drum.ioInitialize23ForAutoReload();
-                this.drum.ioStop("INIT AUTO RELOAD");
+                // Line 23 is initialized by the I/O system's own timing (OY set at
+                // the next TF during TRANSFER), concurrently with the Processor (TOO
+                // dwg 66, items 15b, 32a). Do not await it here: the I/O drum timing
+                // must be able to step against the Processor's TRANSFER state.
+                // receiveInputCode() waits for it before accepting the first code.
+                this.ioAutoReloadInit = (async () => {
+                    await this.drum.ioStart("INIT AUTO RELOAD");
+                    await this.drum.ioInitialize23ForAutoReload();
+                    this.drum.ioStop("INIT AUTO RELOAD");
+                })();
             }
         }
 
