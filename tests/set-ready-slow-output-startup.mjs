@@ -5,6 +5,7 @@ import {Processor} from '../emulator/Processor.js';
 import * as Util from '../emulator/Util.js';
 Util.setTiming(Util.defaultRPM * 100);
 let cases=0;
+for (const manual of [false,true]) {
 for (const operation of ['typeAR','typeLine19','punchLine19']) {
     // Typewriter's initial delay puts format at time216; punch format at108.
     const formatTime=operation==='punchLine19'?108:216;
@@ -28,27 +29,36 @@ for (const operation of ['typeAR','typeLine19','punchLine19']) {
                 await step();
                 if(d.drumTime===cancelAt) {
                     captured={line:Array.from(d.line[19]),mz:Array.from(d.MZ)};
-                    await p.initiateIO(0);
+                    if(manual)await p.executeKeyboardCommand(4);
+                    else await p.initiateIO(0);
                 }
             };
             const finish=p.finishIO.bind(p);
             p.finishIO=()=>{finish();if(p.OC.value===16)readyTime=d.drumTime;};
             await p[operation]();
             while(d.ioActive) await new Promise(resolve=>setImmediate(resolve));
-            const precess=operation!=='typeAR'||cancelAt<formatTime+216;
+            const precess=(!manual && operation!=='typeAR')||cancelAt<formatTime+216;
             assert.ok(captured);
-            const label=`${operation} cancel=${cancelAt}, MZ=${mz}`;
-            assert.deepEqual(Array.from(d.line[19]),precess?
-                [...captured.mz,...captured.line.slice(0,104)]:captured.line,label);
-            if(precess) {
-                assert.deepEqual(Array.from(d.MZ),captured.line.slice(104),label);
-                assert.equal(readyTime,Math.ceil(cancelAt/108)*108+108,label);
+            const label=`manual=${manual} ${operation} cancel=${cancelAt}, MZ=${mz}`;
+            const expected=captured.line.slice(),buffer=captured.mz.slice();
+            let position=cancelAt%108,elapsed=0;
+            const oe=cancelAt>=formatTime+108 && cancelAt<formatTime+216;
+            if(precess){
+                if(!oe)while(position!==0){buffer[position%4]=0;position=(position+1)%108;++elapsed;}
+                do{
+                    const old=expected[position];expected[position]=buffer[position%4];buffer[position%4]=old;
+                    position=(position+1)%108;++elapsed;
+                }while(position!==0);
             }
+            assert.deepEqual(Array.from(d.line[19]),expected,label);
+            assert.deepEqual(Array.from(d.MZ),buffer,label);
+            if(precess)assert.equal(readyTime,cancelAt+elapsed,label);
             assert.equal(p.OC.value,16,label);
             // Punch emits its documented initial SPACE; cancellation emits no data.
             assert.equal(output.length,operation==='punchLine19'?(cancelAt<formatTime?0:cancelAt>formatTime+216?2:1):0,label);
             ++cases;
         }
     }
+}
 }
 console.log(`${cases} SET READY slow-output startup/data/timing cases passed`);

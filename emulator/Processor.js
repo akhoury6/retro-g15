@@ -106,6 +106,7 @@ class Processor {
         this.activeIODevice = null;                     // current I/O device object
         this.canceledIO = false;                        // current I/O has been canceled
         this.setReadyPrecession = false;                // SET READY will precess line 19
+        this.setReadyOE = 0;                            // phase retained when OC resets
         this.slowOutputODUntil = 0;                     // OD remains set until data-cycle ending T0
         this.slowOutputNextF = 0;                       // next end-of-data T0
         this.slowOutputOE = 0;                          // format/delay=0, data=1
@@ -1728,6 +1729,15 @@ class Processor {
             this.setCommandLine(this.CD.value | (code & 0b00111));
             break;
         case IOCodes.ioCodeStop:        // S - Cancel I/O
+            // Manual S resets OC without setting OD (E11f); an existing
+            // startup/reload OD nevertheless survives and selects FAST-OUT.
+            if (this.OC.value >= IOCodes.ioCmdTypeAR && this.OC.value <= IOCodes.ioCmdPunch19) {
+                if (this.drum.drumTime < this.slowOutputODUntil) {
+                    this.setReadyPrecession = true;
+                    this.setReadyOE = this.slowOutputOE;
+                }
+                this.drum.ioCancel();
+            }
             this.cancelIO();
             break;
         default:
@@ -2126,13 +2136,13 @@ class Processor {
 
     /**************************************/
     async precessForSetReady() {
-        /* Performs the 4-word precession of line 19 caused by a SET READY
-        command (OD•FAST-OUT), then finishes the I/O. The precession starts at
-        T0 and lasts one drum cycle, so Ready rises after the second T0
-        following the SET READY (TOO F-17) */
+        /* Complete retained/set OD using the OE phase at OC reset.
+        OE=0 clears passing MZ words then exchanges for one cycle; OE=1
+        exchanges only the remainder of its cycle (drawings60/61). */
 
         await this.drum.ioStart("SET READY");
-        await this.drum.ioPrecess19ToMZ();
+        await this.drum.ioCompleteSetReady(this.setReadyOE);
+        this.setReadyOE = 0;
         this.drum.ioStop("SET READY");
         this.finishIO();
     }
@@ -2214,6 +2224,7 @@ class Processor {
             if (this.OC.value != IOCodes.ioCmdReady &&
                     ((this.OC.value & 0b0011) || this.drum.drumTime < this.slowOutputODUntil)) {
                 this.setReadyPrecession = true;
+                this.setReadyOE = this.slowOutputOE;
             }
             // OC reset with OD clear is immediately Ready (F9b); with OD set,
             // the abandoned slow-output delay must not postpone FAST-OUT.

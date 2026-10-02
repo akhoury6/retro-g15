@@ -883,6 +883,28 @@ class Drum {
     }
 
     /**************************************/
+    async ioCompleteSetReady(oe) {
+        /* OC reset selects FAST-OUT. With OD set/OE clear, the MZ
+        regeneration gate is closed until T0: clear only passing words.
+        With OE already set, exchange begins at once and F ends it at the
+        next T0. TOO drawings60/61; F10d; Memo39's <=103 requirement. */
+        if (!oe) {
+            const clearWords = Drum.computeDrumCount(this.L.value, 0);
+            for (let x=0; x<clearWords; ++x) {
+                this.ioWriteMZ(0);
+                await this.ioWaitFor(1);
+            }
+        }
+        const exchangeWords = Util.longLineSize-this.L.value;
+        for (let x=0; x<exchangeWords; ++x) {
+            const word = this.ioRead19();
+            this.ioWrite19(this.ioReadMZ());
+            this.ioWriteMZ(word);
+            await this.ioWaitFor(1);
+        }
+    }
+
+    /**************************************/
     async ioPrecessCodeTo23(code, bits) {
         /* Stores the value of "code" into the low-order "bits" of line 23
         word 0, precessing the original contents of line 23 to higher word

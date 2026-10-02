@@ -23,7 +23,7 @@ for (const kind of ['reload','duplicate']) {
     };
     await p.typeAR();
     while(d.ioActive)await new Promise(r=>setImmediate(r));
-    assert.deepEqual(Array.from(d.line[19]),[...original.mz,...original.line.slice(0,104)],kind);
+    assert.deepEqual(Array.from(d.line[19]),[0,0,0,0,...original.line.slice(0,104)],kind);
     assert.equal(d.drumTime,648,kind+' Ready second followingT0');
     assert.deepEqual(output,[],kind+' no character before cancellation');
 }
