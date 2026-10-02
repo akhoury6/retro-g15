@@ -2440,7 +2440,8 @@ class Processor {
         let mark = 0;
 
         this.setCommandLine((this.C1.value << 2) | this.C.value);
-        if (this.DI.value) {    // deferred execution
+        if (this.DI.value) {    // deferred execution: TRANSFER takes place during WT=T only (TOO D-6f)
+            await this.drum.waitUntil(this.T.value);
             mark = this.T.value;
         } else {                // immediate execution
             mark = this.drum.L.value;
