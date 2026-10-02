@@ -113,6 +113,7 @@ class Processor {
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
         this.ioPrecession = Promise.resolve();          // Promise for I/O line 19 precession
+        this.ioInputOperation = Promise.resolve();     // serialized line-23 frame/initialization operations
         this.ioAutoReloadInit = Promise.resolve();      // Promise for line 23 auto-reload initialization
 
         // Bound methods
@@ -1539,14 +1540,41 @@ class Processor {
     *******************************************************************/
 
     /**************************************/
-    async receiveInputCode(code) {
+    queueInputOperation(operation) {
+        // Character precession and marker initialization both own the line-23
+        // quartet path. Keep their async work ordered without blocking the CPU.
+        this.ioInputOperation = this.ioInputOperation.then(operation);
+        return this.ioInputOperation;
+    }
+
+    /**************************************/
+    initializeAutoReload() {
+        // DS.CV'.C1 sets AS and, at TF, OY even while I/O is busy (dwg 66).
+        // At word resolution finish an accepted quartet before initialization;
+        // a subsequent character must see the resulting marker and AS state.
+        this.AS.value = 1;
+        this.ioAutoReloadInit = this.queueInputOperation(async () => {
+            if (this.canceledIO || !this.AS.value || (this.OC.value & 0b1100) != 0b1100) {
+                return;
+            }
+            await this.drum.ioStart("INIT AUTO RELOAD");
+            await this.drum.ioInitialize23ForAutoReload();
+            this.drum.ioStop("INIT AUTO RELOAD");
+        });
+    }
+
+    /**************************************/
+    receiveInputCode(code) {
+        return this.queueInputOperation(() => this.processInputCode(code));
+    }
+
+    /**************************************/
+    async processInputCode(code) {
         /* Receives the next I/O code from an input device and either stores
         it onto the drum or acts on its control function */
         const autoReload = this.AS.value && (this.OC.value & 0b1100) == 0b1100; // SLOW IN only
         let eob = 0;                    // end-of-block flag
         let marker = 0;                 // auto-reload marker code
-
-        await this.ioAutoReloadInit;    // line 23 auto-reload initialization must finish first
 
         if ((this.OC.value & 0b01100) != 0b01100) {
             eob = 1;                            // canceled or not SLOW IN
@@ -2116,13 +2144,15 @@ class Processor {
         // OC has set-only command gates (TOO drawing 45). In particular,
         // Memo 99 starts automatic TYPE IN, then selects the photo reader
         // with C0 S15 without a Ready interval or a fresh line-23 marker.
-        // Restrict this handoff to modeled input devices and C0 requests;
-        // busy C1 initialization needs synchronization with an input frame.
-        if (!this.C1.value && !this.canceledIO &&
+        // The same modeled devices also accept C1 initialization while busy.
+        if (!this.canceledIO &&
                 (this.OC.value == IOCodes.ioCmdTypeIn || this.OC.value == IOCodes.ioCmdPTRead) &&
                 (sCode == IOCodes.ioCmdTypeIn || sCode == IOCodes.ioCmdPTRead)) {
             const priorCode = this.OC.value;
             this.OC.value |= sCode;
+            if (this.C1.value) {
+                this.initializeAutoReload();
+            }
             if (priorCode == IOCodes.ioCmdTypeIn && this.OC.value == IOCodes.ioCmdPTRead) {
                 // Change OC before cancel(): Typewriter's cancelTypeIn callback
                 // must not finish the input and clear AS, OS, or pending state.
@@ -2170,16 +2200,9 @@ class Processor {
         if (this.C1.value) {
             this.AS.value = 1;          // set automatic line 23 reload
             if ((sCode & 0b1100) == 0b1100) {   // SLOW IN commands
-                // Line 23 is initialized by the I/O system's own timing (OY set at
-                // the next TF during TRANSFER), concurrently with the Processor (TOO
-                // dwg 66, items 15b, 32a). Do not await it here: the I/O drum timing
-                // must be able to step against the Processor's TRANSFER state.
-                // receiveInputCode() waits for it before accepting the first code.
-                this.ioAutoReloadInit = (async () => {
-                    await this.drum.ioStart("INIT AUTO RELOAD");
-                    await this.drum.ioInitialize23ForAutoReload();
-                    this.drum.ioStop("INIT AUTO RELOAD");
-                })();
+                // The CPU continues its transfer while the I/O quartet work
+                // executes in sequence with any accepted input characters.
+                this.initializeAutoReload();
             }
         }
 
