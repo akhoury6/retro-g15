@@ -1902,12 +1902,13 @@ class Processor {
                         break;
                     case IOCodes.ioCodeCR:
                     case IOCodes.ioCodeTab:
-                        suppressing = (this.punchSwitch != 1);      // establish suppression for next char
-                        break;
                     case IOCodes.ioCodeSpace:       // used for +sign
                     case IOCodes.ioCodeMinus:
-                    case IOCodes.ioCodeReload:
                     case IOCodes.ioCodeWait:
+                        // any non-DIGIT format character resets OB5 (TOO dwg 52)
+                        suppressing = (this.punchSwitch != 1);      // establish suppression for next char
+                        break;
+                    case IOCodes.ioCodeReload:
                         // does not affect suppression
                         break;
                     case IOCodes.ioCodeStop:
@@ -2016,12 +2017,13 @@ class Processor {
                         break;
                     case IOCodes.ioCodeCR:
                     case IOCodes.ioCodeTab:
+                    case IOCodes.ioCodeSpace:       // used for +sign
+                    case IOCodes.ioCodeMinus:
+                    case IOCodes.ioCodeWait:
+                        // any non-DIGIT format character resets OB5 (TOO dwg 52)
                         suppressing = (this.punchSwitch != 1);      // establish suppression for next char
                         break;
-                    case IOCodes.ioCodeSpace:
-                    case IOCodes.ioCodeMinus:
                     case IOCodes.ioCodeReload:
-                    case IOCodes.ioCodeWait:
                         // does not affect suppression
                         break;
                     case IOCodes.ioCodeStop:
