@@ -2873,7 +2873,13 @@ class Processor {
                 }
             } else if (this.TR.value) { // enter TRANSFER (execute) state
                 await this.transfer();
-                this.CZ.value = 1;      // disable stepping
+                if (!this.CZ.value && this.D.value == 31 && this.S.value == 20) {
+                    // Single-cycling a Return Exit: its T13•CC starts the next RC
+                    // regardless of CH and CZ, so the following command is also
+                    // executed before the halt (PRM p.57; TOO D-6l, dwg 30).
+                } else {
+                    this.CZ.value = 1;  // disable stepping
+                }
                 if (this.bpHalt) {      // halt after executing a breakpointed command
                     this.bpHalt = false;
                     this.CH.value = 1;  // set HALT FF; unlike stop(), leaves CQ and CG intact
