@@ -105,7 +105,8 @@ class Processor {
         // I/O Subsystem
         this.activeIODevice = null;                     // current I/O device object
         this.canceledIO = false;                        // current I/O has been canceled
-        this.setReadyPrecession = false;                // SET READY will precess line 19 (OC1+OC2)
+        this.setReadyPrecession = false;                // SET READY will precess line 19
+        this.slowOutputODUntil = 0;                     // OD remains set until format-cycle ending T0
         this.duplicateIO = false;                       // second I/O of same type initiated while first in progress
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
@@ -1805,6 +1806,7 @@ class Processor {
         let zeroed = false;             // precessor function reports line 19 all zeroes
 
         this.OC.value = IOCodes.ioCmdPunch19;
+        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
         this.activeIODevice = this.devices.paperTapePunch;
         this.devices.paperTapePunch.makeBusy(true);
         await this.drum.ioStart("PUNCH 19");
@@ -1826,6 +1828,9 @@ class Processor {
                 if (!this.canceledIO) {
                     if (reloadMZ) {
                         reloadMZ = false;
+                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        this.slowOutputODUntil = this.drum.drumTime +
+                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -1886,6 +1891,7 @@ class Processor {
         let zeroed = false;             // (ignored for AR typeout)
 
         this.OC.value = IOCodes.ioCmdTypeAR;
+        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
         this.activeIODevice = this.devices.typewriter;
         await this.drum.ioStart("TYPE AR");
 
@@ -1908,6 +1914,9 @@ class Processor {
                 if (!this.canceledIO) {
                     if (reloadMZ) {
                         reloadMZ = false;
+                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        this.slowOutputODUntil = this.drum.drumTime +
+                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(3, 3);  // get initial format code for AR
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -1995,6 +2004,7 @@ class Processor {
         let zeroed = false;             // precessor function reports line 19 all zeroes
 
         this.OC.value = IOCodes.ioCmdType19;
+        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
         this.activeIODevice = this.devices.typewriter;
         await this.drum.ioStart("TYPE 19");
 
@@ -2017,6 +2027,9 @@ class Processor {
                 if (!this.canceledIO) {
                     if (reloadMZ) {
                         reloadMZ = false;
+                        // OD resets at F=T0·OE, after this format cycle (dwg 52).
+                        this.slowOutputODUntil = this.drum.drumTime +
+                                Drum.computeDrumCount(this.drum.L.value, 0) + Util.longLineSize;
                         fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
                     } else {
                         fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
@@ -2201,13 +2214,14 @@ class Processor {
         }
 
         if (this.setReadyPrecession) {
-            // A SET READY command found OC1+OC2 set: precess line 19 first and
+            // SET READY found or set OD: precess line 19 first and
             // become Ready only after that (TOO F-17, F-9b, dwg 60)
             this.setReadyPrecession = false;
             this.precessForSetReady();          // async -- calls finishIO() when done
             return;
         }
 
+        this.slowOutputODUntil = 0;
         this.OC.value = IOCodes.ioCmdReady;     // set I/O Ready state
         this.AS.value = 0;
         this.OS.value = 0;
@@ -2268,11 +2282,17 @@ class Processor {
 
         switch (sCode) {
         case IOCodes.ioCmdCancel:       // 0000 cancel current I/O
-            // SET READY sets OD, hence a 4-word precession of line 19, only if
-            // the OC configuration is not divisible by 4: DS•S0•(OC1+OC2) on ODs
-            // (TOO F-17, dwg 60). The "S" key does not (TOO E-11f).
-            if (this.OC.value != IOCodes.ioCmdReady && (this.OC.value & 0b0011)) {
+            // DS·S0·(OC1+OC2) can set OD, but clearing OC does not reset
+            // an OD already set by slow-output initiation. In particular an
+            // early TYPE AR / SET READY precesses M19 (Memo 39; dwgs 52, 60).
+            if (this.OC.value != IOCodes.ioCmdReady &&
+                    ((this.OC.value & 0b0011) || this.drum.drumTime < this.slowOutputODUntil)) {
                 this.setReadyPrecession = true;
+                // Unwind the old output wait before starting FAST-OUT at the
+                // next T0, rather than waiting for its character-cycle delay.
+                if (this.OC.value >= IOCodes.ioCmdTypeAR && this.OC.value <= IOCodes.ioCmdPunch19) {
+                    this.drum.ioCancel();
+                }
             }
             this.cancelIO();
             break;
