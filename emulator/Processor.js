@@ -1446,6 +1446,12 @@ class Processor {
                 this.shiftMQLeftOdd();
                 if (this.C.value == 0) {        // increment AR and check for overflow
                     if (this.incrementAR() == 0) {
+                        // The AR carry stops TR at T29 of this odd word.
+                        // Unlike T-count termination, it cannot set CK through
+                        // TRr: one WRC word must pass before RC can start.
+                        // If the T count expires here too, its TRr wins.
+                        // Theory of Operation C-18 (p.46), D-12d-g (p.60), dwg.30.
+                        await this.drum.waitFor(count == 1 ? 1 : 2);
                         break; // out of while loop
                     }
                 }
@@ -1502,6 +1508,14 @@ class Processor {
 
             await this.drum.waitFor(1);
             --count;
+        }
+
+        if (pm && count > 0) {
+            // PM ends TR at T1 of the following even word, too late to
+            // read a command in that word. T-count termination at T29 of
+            // the preceding word takes precedence when count is exhausted.
+            // Theory of Operation C-18 (p.46), D-13c-d (p.61), dwg.30.
+            await this.drum.waitFor(1);
         }
 
         if (this.tracing) {
