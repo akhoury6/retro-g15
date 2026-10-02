@@ -105,6 +105,7 @@ class Processor {
         // I/O Subsystem
         this.activeIODevice = null;                     // current I/O device object
         this.canceledIO = false;                        // current I/O has been canceled
+        this.setReadyPrecession = false;                // SET READY will precess line 19 (OC1+OC2)
         this.duplicateIO = false;                       // second I/O of same type initiated while first in progress
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
@@ -1951,11 +1952,6 @@ class Processor {
             } while (code != IOCodes.ioCodeReload && printing);
         } while (printing);
 
-        if (this.canceledIO) {
-            // Canceling an I/O causes a 4-word precession of line 19, see TOO p.92 & dwg 60.
-            await this.drum.ioPrecess19ToMZ();
-        }
-
         this.drum.ioStop("TYPE AR");
         this.finishIO();
     }
@@ -2180,6 +2176,14 @@ class Processor {
             debugger;
         }
 
+        if (this.setReadyPrecession) {
+            // A SET READY command found OC1+OC2 set: precess line 19 first and
+            // become Ready only after that (TOO F-17, F-9b, dwg 60)
+            this.setReadyPrecession = false;
+            this.precessForSetReady();          // async -- calls finishIO() when done
+            return;
+        }
+
         this.OC.value = IOCodes.ioCmdReady;     // set I/O Ready state
         this.AS.value = 0;
         this.OS.value = 0;
@@ -2187,6 +2191,19 @@ class Processor {
         this.activeIODevice = null;
         this.duplicateIO = false;
         this.hungIO = false;
+    }
+
+    /**************************************/
+    async precessForSetReady() {
+        /* Performs the 4-word precession of line 19 caused by a SET READY
+        command (OD•FAST-OUT), then finishes the I/O. The precession starts at
+        T0 and lasts one drum cycle, so Ready rises after the second T0
+        following the SET READY (TOO F-17) */
+
+        await this.drum.ioStart("SET READY");
+        await this.drum.ioPrecess19ToMZ();
+        this.drum.ioStop("SET READY");
+        this.finishIO();
     }
 
     /**************************************/
@@ -2220,6 +2237,12 @@ class Processor {
 
         switch (sCode) {
         case IOCodes.ioCmdCancel:       // 0000 cancel current I/O
+            // SET READY sets OD, hence a 4-word precession of line 19, only if
+            // the OC configuration is not divisible by 4: DS•S0•(OC1+OC2) on ODs
+            // (TOO F-17, dwg 60). The "S" key does not (TOO E-11f).
+            if (this.OC.value != IOCodes.ioCmdReady && (this.OC.value & 0b0011)) {
+                this.setReadyPrecession = true;
+            }
             this.cancelIO();
             break;
 
