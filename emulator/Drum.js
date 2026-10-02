@@ -857,9 +857,10 @@ class Drum {
 
     /**************************************/
     async ioPrecess19ToMZ() {
-        /* Precesses the high-order 4 words of line 19 to MZ and zeroes into the
-        low-order words of line 19. This is normally used by canceling an I/O to
-        get the 4-word precession as a side effect */
+        /* Exchanges line 19 through MZ for one long-line cycle: old MZ enters
+        words 0-3, old 19:0-103 moves to 19:4-107, and old 19:104-107 enters MZ.
+        SET READY uses this OD/FAST-OUT path (TOO F-17, Drawing 60). Zeros enter
+        the low words only when MZ was zero (F-10d), not unconditionally. */
         let word = 0;
 
         await this.ioWaitUntil(0);      // start precession at T0
@@ -869,7 +870,7 @@ class Drum {
                 debugger;
             }
 
-            this.ioWrite19(x < Util.fastLineSize ? 0 : this.ioReadMZ());
+            this.ioWrite19(this.ioReadMZ());
             this.ioWriteMZ(word);
             await this.ioWaitFor(1);
         }
