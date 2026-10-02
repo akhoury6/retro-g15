@@ -718,7 +718,8 @@ class Drum {
     /**************************************/
     async ioPrecessMZToCode(bits) {
         /* Precesses the original contents of MZ by "bits" bits to higher
-        word numbers, inserting zero in the "bits" low-order bits of word 0,
+        word numbers, preserving T1 of word 0 and zero-filling the other
+        vacated low-order bits,
         and returning the original "bits" high order bits of word 3. Always
         starts a precession at T0. This is normally used to get the next 3-bit
         format code for slow output */
@@ -728,6 +729,9 @@ class Drum {
         let word = 0;
 
         await this.ioWaitUntil(0);      // start precession at T0
+        // OG begins at T2 of word 0, leaving MZ T1 recirculating.
+        // TOO F-8z (PDF 93), Drawing 52 (PDF 156).
+        code = this.MZ[0] & Util.wordSignMask;
         for (let x=0; x<Util.fastLineSize; ++x) {
             if (this.ioCanceled) {
                 code = 0;
@@ -750,8 +754,8 @@ class Drum {
     /**************************************/
     async ioPrecessLongLineToMZ(line, bits) {
         /* Precesses the original contents of words 0-3 of the specified long
-        line to MZ by "bits" bits, inserting zero in the "bits" low-order bits of
-        MZ word 0, and returning the original "bits" high order bits of word 3
+        line to MZ by "bits" bits, preserving the original MZ word 0 T1
+        and zero-filling the other vacated low-order bits, and returning the original "bits" high order bits of word 3
         from the long line. This is normally used to load MZ from the long line
         and return the first 3-bit format code for slow output */
         let keepBits = Util.wordBits - bits;
@@ -760,6 +764,9 @@ class Drum {
         let word = 0;
 
         await this.ioWaitUntil(0);      // start precession at T0
+        // OG begins at T2 of word 0, leaving MZ T1 recirculating.
+        // TOO F-8z (PDF 93), Drawing 52 (PDF 156).
+        code = this.MZ[0] & Util.wordSignMask;
         for (let x=0; x<Util.fastLineSize; ++x) {
             if (this.ioCanceled) {
                 code = 0;
