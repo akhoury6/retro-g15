@@ -1944,7 +1944,7 @@ class Processor {
         delay is qualified by OF3 and ENABLE. See TOO F8u-ad, dwgs52-55. */
         const d = this.drum;
         let bufferedCode = IOCodes.ioCodeSpace;
-        let suppressing = this.punchSwitch != 1;
+        let suppressing = true; // READY resets OB5 independently of MAN PUNCH
         let initial = true;
         let unsupported = false;
         this.slowOutputResidue = null; // new controller owns OE; retire old tail token
@@ -2000,8 +2000,11 @@ class Processor {
                     code = IOCodes.ioCodeSpace;
                 } else if (code & IOCodes.ioDataMask || code == IOCodes.ioCodePeriod) {
                     suppressing = false;
-                } else if (code != IOCodes.ioCodeReload && code != IOCodes.ioCodeStop) {
-                    suppressing = this.punchSwitch != 1;
+                } else {
+                    // [non-DIGIT]OF·SLOW-OUT·OE resets OB5 even for RELOAD
+                    // and even with MAN PUNCH on (TOO drawing52). PUNCH
+                    // bypasses suppression by setting OB5 on the next DIGIT.
+                    suppressing = true;
                 }
             }
             bufferedCode = code;
