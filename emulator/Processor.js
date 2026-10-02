@@ -773,11 +773,13 @@ class Processor {
                         this.drum.write(regAR, ib = word & Util.absWordMask);
                     }
                 }
+                this.drum.write(regPN, 0); // clear this half of PN
                 break;
             case 28:    // AR
             case 29:    // 20.IR
             case 30:    // 20/.21
             case 31:    // 20.21
+                // Absolute value (AV), not TVA: PN is not cleared (TOO C-12d PN(3))
                 if (!this.C1.value || this.drum.CE) {
                     this.drum.write(regID, lb = word & Util.absWordMask);
                 } else {
@@ -799,13 +801,12 @@ class Processor {
                         this.IP.value = word & Util.wordSignMask;
                     }
                 }
+                this.drum.write(regPN, 0); // clear this half of PN
                 break;
             } // switch this.S
 
-            this.drum.write(regPN, 0); // clear this half of PN
-
             if (this.tracing) {
-                this.traceTransfer("->ID", tva, word, ib, lb, `: IP=${this.IP.value} PN=0`);
+                this.traceTransfer("->ID", tva, word, ib, lb, `: IP=${this.IP.value}` + (tva ? " PN=0" : ""));
             }
             break;
 
