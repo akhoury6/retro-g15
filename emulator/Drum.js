@@ -794,18 +794,11 @@ class Drum {
 
     /**************************************/
     async ioInitialize23ForAutoReload() {
-        /* Initializes line 23 for auto reload. Sets the T1 bit of word 0 in
-        line 23 and zeroes the remaining bits of the line */
+        /* C1 sets OY, copying old line 23 to MZ while AUTO clears line 23
+        and inserts its new marker. It does not by itself set OD or move
+        MZ into line 19 (TOO F-4p, drawings 66 and 68). */
 
-        await this.ioWaitUntil4(0);
-        for (let x=0; x<Util.fastLineSize; ++x) {
-            if (this.ioCanceled) {
-                break;
-            }
-
-            this.ioWrite23(x == 0 ? 1 : 0);
-            await this.ioWaitFor(1);
-        }
+        await this.ioCopy23ToMZ(true);
     }
 
     /**************************************/
