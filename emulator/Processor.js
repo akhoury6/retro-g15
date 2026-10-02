@@ -633,7 +633,14 @@ class Processor {
             break;
         } // switch this.C
 
-        this.drum.write(this.D.value, lb)
+        // Via-AR writes into two-word lines are enabled only on odd
+        // words. The even half is cleared regardless of the old AR value.
+        // This applies to AVA as well as TVA (Theory of Operation C-12d,
+        // printed p.37, and drawing 34: not-CS OR not-CE write qualifier).
+        if (this.CS.value && this.drum.CE && this.D.value >= regMQ && this.D.value <= regPN) {
+            lb = 0;
+        }
+        this.drum.write(this.D.value, lb);
 
         if (this.tracing) {
             this.traceTransfer(prefix, this.CS.value, word, ib, lb, null);
@@ -952,8 +959,8 @@ class Processor {
             }
             break;
 
-        case 3: // SU
-            if (dest != regPN) {
+        case 3: // AVA or SU
+            if (dest != regPN || this.CS.value) {
                 this.transferNormal(mnem);
             } else {
                 word = this.readSource();
