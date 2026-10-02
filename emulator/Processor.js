@@ -78,6 +78,7 @@ class Processor {
         // General emulator state
         this.cmdLine = 0;                               // current actual command line (see CDXlate)
         this.cmdWord = 0;                               // current command word
+        this.bpHalt = false;                            // halt after the current (breakpointed) command
         this.deferredBP = false;                        // breakpoint deferred due to return exit cmd
         this.isNCAR = 0;                                // current command is executed from AR (for tracing only)
         this.overflowed = false;                        // true if last addition overflowed (DEBUG)
@@ -2855,22 +2856,28 @@ class Processor {
                 }
 
                 if (this.computeSwitch == 2) {  // Compute switch set to BP
-                    // Do not stop on a Mark Return command; stop on the next command
-                    // instead. See Tech Memo 41.
+                    // A breakpoint sets CH during RC, which only blocks the next RC,
+                    // so the breakpointed command is executed before the halt (TOO
+                    // C-20, E-5, dwg 30). Do not stop on a Mark Return command; stop
+                    // after the next command instead. See Tech Memo 41.
                     if  (this.deferredBP) {     // if breakpoint has been deferred, take it now
                         this.deferredBP = false;
-                        this.stop();
+                        this.bpHalt = true;
                     } else if (this.BP.value) { // if this is a Mark Return, defer the BP
                         if (this.D.value == 31 && this.S.value == 20) {
                             this.deferredBP = true;
                         } else {
-                            this.stop();
+                            this.bpHalt = true;
                         }
                     }
                 }
             } else if (this.TR.value) { // enter TRANSFER (execute) state
                 await this.transfer();
                 this.CZ.value = 1;      // disable stepping
+                if (this.bpHalt) {      // halt after executing a breakpointed command
+                    this.bpHalt = false;
+                    this.CH.value = 1;  // set HALT FF; unlike stop(), leaves CQ and CG intact
+                }
             } else {
                 this.warning("State neither RC nor TR");
                 debugger;
@@ -2887,6 +2894,7 @@ class Processor {
         /* Initiates the processor on the Javascript thread */
 
         if (this.poweredOn && this.CH.value) {
+            this.bpHalt = false;        // a manual restart supersedes a pending breakpoint halt
             this.CZ.value = 1;          // disable stepping
             this.CH.value = 0;          // reset HALT FF
             this.run();                 // async -- returns immediately
