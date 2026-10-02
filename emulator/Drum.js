@@ -83,6 +83,8 @@ class Drum {
         this.drumTime = 0;              // drum clock in word-times
         this.timingActive = false;      // true if the timing mechanism is active
         this.stepWait = null;           // Promise used by stepDrum() to serialize stepping
+        this.wordTimeHook = null;       // residual hardware action before the next word
+        this.idleWordTimePump = null;   // clock ownership only while CPU and I/O are idle
         this.drumTimer = new Util.Timer();
         this.line19Timer = new Util.Timer();
 
@@ -216,6 +218,13 @@ class Drum {
             throw new Error("Drum stepDrum called during stepping");
         }
 
+        // Residual gates can operate even when OC/OD already indicate Ready.
+        // They share the physical word clock, never a second I/O coroutine.
+        const hook = this.wordTimeHook;
+        if (hook && hook() === false && this.wordTimeHook === hook) {
+            this.wordTimeHook = null;
+        }
+
         // Determine if it's time slow things down to real time.
         if ((this.eTime += Util.wordTime) < this.eTimeSliceEnd) {
             this.stepWait = Promise.resolve();  // i.e., don't wait at all
@@ -229,6 +238,28 @@ class Drum {
 
         await this.stepWait;
         this.stepWait = null;
+    }
+
+    /**************************************/
+    resumeIdleWordTimePump() {
+        /* Keep rotating for residual gates while neither normal clock owner
+        is active. ioStart/procStart claim ownership before awaiting stepWait. */
+        if (!this.wordTimeHook || this.procActive || this.ioActive || this.idleWordTimePump) return;
+        this.idleWordTimePump = (async () => {
+            // Defer until the caller has completed its Ready/state changes.
+            await Promise.resolve();
+            while (this.wordTimeHook && !this.procActive && !this.ioActive) {
+                if (this.stepWait) await this.stepWait;
+                if (!this.wordTimeHook || this.procActive || this.ioActive) break;
+                await this.stepDrum();
+            }
+            if (!this.wordTimeHook && !this.procActive && !this.ioActive && this.timingActive) {
+                this.stopTiming();
+            }
+        })().finally(() => {
+            this.idleWordTimePump = null;
+            if (this.wordTimeHook && !this.procActive && !this.ioActive) this.resumeIdleWordTimePump();
+        });
     }
 
     /**************************************/
@@ -289,7 +320,8 @@ class Drum {
             }
 
             if (!this.ioActive) {
-                this.stopTiming();
+                if (this.wordTimeHook) this.resumeIdleWordTimePump();
+                else this.stopTiming();
             }
         }
     }
@@ -310,7 +342,7 @@ class Drum {
                 await this.stepDrum();
             } else if (this.ioSync.waiting) {   // I/O is waiting for us to step
                 await this.stepDrum();
-                this.ioSync.proceed();
+                if (this.ioSync.waiting) this.ioSync.proceed();
             } else {                            // we need to wait for I/O to step
                 await this.procSync.wait();
             }
@@ -526,7 +558,8 @@ class Drum {
             }
 
             if (!this.procActive) {
-                this.stopTiming();
+                if (this.wordTimeHook) this.resumeIdleWordTimePump();
+                else this.stopTiming();
             }
         }
     }
@@ -537,6 +570,9 @@ class Drum {
 
         if (this.ioActive) {
             this.ioCanceled = true;
+            // A canceled controller needs no next drum word to unwind.
+            // Wake it if the CPU currently owns the clock.
+            if (this.ioSync.waiting) this.ioSync.proceed();
         }
     }
 

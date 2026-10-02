@@ -110,6 +110,8 @@ class Processor {
         this.slowOutputODUntil = 0;                     // OD remains set until data-cycle ending T0
         this.slowOutputNextF = 0;                       // next end-of-data T0
         this.slowOutputOE = 0;                          // format/delay=0, data=1
+        this.slowOutputResidue = null;                  // token for OE tail after OC/OD Ready
+        this.slowOutputCompletion = null;               // old coroutine cleanup at same word boundary
         this.duplicateIO = false;                       // second I/O of same type initiated while first in progress
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
@@ -1651,6 +1653,7 @@ class Processor {
             * If the code is 0b10000-0b10111 (keyboard 1-7), then sets
               the command line to the value of that code
         Returns 0 if the command is accepted and 0 if rejected */
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
         let result = 0;                 // assume valid input for now
 
         switch (code) {
@@ -1745,6 +1748,7 @@ class Processor {
                     this.setReadyPrecession = true;
                     this.setReadyOE = this.slowOutputOE;
                 }
+                if (!this.setReadyPrecession && this.slowOutputOE) this.installReadyOutputResidue();
                 this.drum.ioCancel();
             }
             this.cancelIO();
@@ -1871,17 +1875,23 @@ class Processor {
 
     /**************************************/
     async punchLine19() {
-        return this.runSlowOutput(IOCodes.ioCmdPunch19);
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
+        this.slowOutputCompletion = this.runSlowOutput(IOCodes.ioCmdPunch19);
+        return this.slowOutputCompletion;
     }
 
     /**************************************/
     async typeAR() {
-        return this.runSlowOutput(IOCodes.ioCmdTypeAR);
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
+        this.slowOutputCompletion = this.runSlowOutput(IOCodes.ioCmdTypeAR);
+        return this.slowOutputCompletion;
     }
 
     /**************************************/
     async typeLine19() {
-        return this.runSlowOutput(IOCodes.ioCmdType19);
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
+        this.slowOutputCompletion = this.runSlowOutput(IOCodes.ioCmdType19);
+        return this.slowOutputCompletion;
     }
 
     /**************************************/
@@ -1937,6 +1947,7 @@ class Processor {
         let suppressing = this.punchSwitch != 1;
         let initial = true;
         let unsupported = false;
+        this.slowOutputResidue = null; // new controller owns OE; retire old tail token
         this.OC.value = sCode;
         this.slowOutputOE = 0;
         this.slowOutputODUntil = Infinity;
@@ -2132,7 +2143,7 @@ class Processor {
         }
 
         this.slowOutputODUntil = 0;
-        this.slowOutputOE = 0;
+        if (!this.slowOutputResidue) this.slowOutputOE = 0;
         this.OC.value = IOCodes.ioCmdReady;     // set I/O Ready state
         this.drum.OF.value &= 0b101;     // READY resets OF2, not OF1/OF3 (dwg 52)
         this.AS.value = 0;
@@ -2141,6 +2152,41 @@ class Processor {
         this.activeIODevice = null;
         this.duplicateIO = false;
         this.hungIO = false;
+    }
+
+    /**************************************/
+    installReadyOutputResidue() {
+        /* OD=0, OE=1 survives OC reset. READY is already high, but until
+        the next F, FAST-OUT writes MZ to19 and ORs old MZ with19 into MZ.
+        The write-head inputs are ORed (TOO A7m; dwgs48/60). */
+        const d = this.drum;
+        const token = {};
+        this.slowOutputResidue = token;
+        this.OC.value = IOCodes.ioCmdReady;
+        this.AS.value = 0;
+        this.OS.value = 0;
+        d.OF.value &= 0b101;
+        this.canceledIO = true;
+        // Install before ioStop so clock phase is preserved even with CPU halted.
+        d.wordTimeHook = () => {
+            if (this.slowOutputResidue !== token) return false;
+            const oc = this.OC.value;
+            if (oc != IOCodes.ioCmdReady && (oc & 0b1100)) {
+                // Another I/O mode no longer qualifies the FAST-OUT gates.
+                this.slowOutputResidue = null;
+                return false;
+            }
+            const word = d.ioRead19();
+            const mz = d.ioReadMZ();
+            d.ioWrite19(mz);
+            d.ioWriteMZ(mz | word);
+            if (d.L.value == Util.longLineSize-1) {
+                this.slowOutputOE = 0;
+                this.slowOutputResidue = null;
+                return false;
+            }
+            return true;
+        };
     }
 
     /**************************************/
@@ -2159,6 +2205,11 @@ class Processor {
     /**************************************/
     async initiateIO(sCode) {
         /* Initiates the I/O operation specified by sCode */
+
+        // Ready is visible before a canceled coroutine finishes unwinding.
+        // Let its same-word cleanup complete before assigning a new owner;
+        // this does not delay Ready or add a drum word.
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
 
         // OC has set-only command gates (TOO drawing 45). In particular,
         // Memo 99 starts automatic TYPE IN, then selects the photo reader
@@ -2238,6 +2289,7 @@ class Processor {
             // OC reset with OD clear is immediately Ready (F9b); with OD set,
             // the abandoned slow-output delay must not postpone FAST-OUT.
             if (this.OC.value >= IOCodes.ioCmdTypeAR && this.OC.value <= IOCodes.ioCmdPunch19) {
+                if (!this.setReadyPrecession && this.slowOutputOE) this.installReadyOutputResidue();
                 this.drum.ioCancel();
             }
             this.cancelIO();
@@ -3011,6 +3063,10 @@ class Processor {
         /* Resets the system and initiates loading paper tape. Activated from
         the ControlPanel RESET button */
 
+        if (this.canceledIO && this.OC.value == IOCodes.ioCmdReady) await this.slowOutputCompletion;
+        this.slowOutputResidue = null;
+        this.drum.wordTimeHook = null;
+
         if (this.tracing) {
             console.log("<System Reset>");
         }
@@ -3061,6 +3117,8 @@ class Processor {
             console.log("<System Power Off>");
         }
 
+        this.slowOutputResidue = null;
+        this.drum.wordTimeHook = null;
         this.stop();
         this.cancelIO();
         this.poweredOn = false;
