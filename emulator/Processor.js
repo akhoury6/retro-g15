@@ -2570,16 +2570,19 @@ class Processor {
                 }
             });
             break;
-        case 2:                         // Logical OR line 20 into line 18
+        case 2:                         // Logical OR line 18 into line 20
+            // M20w add: DS•S7•SX•(2)•M18 -- line 20 keeps recirculating, so M18
+            // is OR-ed into it (TOO dwg 66, item 8; alphanumeric and some
+            // modified numeric G-15s).
             await this.transferDriver(() => {
                 let m18 = this.drum.read(18);
-                let m20 = this.drum.readCN();
-                let orSum = m18 | m20;
-                this.drum.write(18, orSum);
+                let m20 = this.drum.read(20);
+                let orSum = m20 | m18;
+                this.drum.write(20, orSum);
                 if (this.tracing) {
-                    console.log("        M18|=M20: L=%s: M18=%s | M20=%s => %s",
+                    console.log("        M20|=M18: L=%s: M20=%s | M18=%s => %s",
                             Util.formatDrumLoc(this.cmdLine, this.drum.L.value, true),
-                            Util.g15SignedHex(m18), Util.g15SignedHex(M20), Util.g15SignedHex(orSum));
+                            Util.g15SignedHex(m20), Util.g15SignedHex(m18), Util.g15SignedHex(orSum));
                 }
             });
             break;
