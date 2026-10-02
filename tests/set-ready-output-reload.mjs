@@ -6,7 +6,7 @@ Util.setTiming(Util.defaultRPM*100);
 for (const kind of ['reload','duplicate']) {
     const p=new Processor({config:{getNode:()=>false}}),d=p.drum;
     p.transferDriver=async()=>{};p.warning=()=>{};
-    const output=[];const device={cancel(){},write(c){output.push(c)}};
+    const output=[];const device={cancel(){},write(c){output.push(c)},makeBusy(){}};
     p.devices={typewriter:device,paperTapePunch:device};
     d.startTiming=()=>{d.timingActive=true};d.L.value=99;d.drumTime=99;
     d.line[3][3]=(kind==='reload'?5:3)<<26;

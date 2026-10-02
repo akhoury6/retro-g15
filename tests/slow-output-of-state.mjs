@@ -21,23 +21,21 @@ for (const operation of ['typeAR','typeLine19']) {
     p.devices={typewriter:device,paperTapePunch:device};
     d.line[2][3]=d.line[3][3]=(0<<26)|(1<<23); // DIGIT, END
     d.AR.value=1<<28; d.line[19][107]=1<<28;
-    for (const method of ['ioPrecessLongLineToMZ','ioPrecessMZToCode']) {
-        const actual=d[method].bind(d);
-        d[method]=async(...args)=>{states.push(d.OF.value);return actual(...args)};
-    }
+    const fetch=p.fetchSlowOutputFormat.bind(p);
+    p.fetchSlowOutputFormat=async()=>{states.push(d.OF.value);return fetch()};
     await p[operation]();
-    assert.deepEqual(states,[1,1],`${operation} TYPE delay OF3 before both extractions`);
+    assert.deepEqual(states,[1,1,1],`${operation} TYPE delay OF3 before both extractions`);
 }
 // END with nonempty19 sets OF1, retaining RELOAD in the old register at reload.
 {
     const p=make(),d=p.drum,states=[];
     d.line[19][107]=1<<28;d.line[2][3]=1<<26; // initial END
-    const actual=d.ioPrecessLongLineToMZ.bind(d);
-    d.ioPrecessLongLineToMZ=async(...args)=>{states.push(d.OF.value);return actual(...args)};
+    const actual=p.fetchSlowOutputFormat.bind(p);
+    p.fetchSlowOutputFormat=async()=>{states.push(d.OF.value);return actual()};
     p.devices={paperTapePunch:{makeBusy(){},write(code){
         if(code===5)d.line[2][3]=1<<23; // next format DIGIT, END
     }}};
     await p.punchLine19();
-    assert.deepEqual(states,[0,5],'converted END feeds RELOAD back through MZ');
+    assert.deepEqual(states,[0,5,0,1],'converted END feeds RELOAD back through MZ');
 }
 console.log('15 OF input/Ready boundaries and 3 slow-output state sequences passed');

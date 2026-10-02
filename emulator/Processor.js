@@ -108,6 +108,7 @@ class Processor {
         this.setReadyPrecession = false;                // SET READY will precess line 19
         this.slowOutputODUntil = 0;                     // OD remains set until data-cycle ending T0
         this.slowOutputNextF = 0;                       // next end-of-data T0
+        this.slowOutputOE = 0;                          // format/delay=0, data=1
         this.duplicateIO = false;                       // second I/O of same type initiated while first in progress
         this.hungIO = false;                            // current I/O is intentionally hung, awaiting cancel
         this.hasPlotter =  context.config.getNode("Plotter.hasPlotter");
@@ -1748,7 +1749,10 @@ class Processor {
         // Format occupies one cycle; every data/nondata action occupies the
         // following full cycle (F-8u/v, dwgs 52, 55), including one-word AR.
         await this.drum.ioWaitUntil(0);
+        if (!this.canceledIO) this.slowOutputOE = 1;
         const dataEnd = this.drum.drumTime + Util.longLineSize;
+        this.OS.value = this.OC.value == IOCodes.ioCmdTypeAR ?
+                this.drum.AR.value & 1 : this.drum.ioDetect19Sign107();
         switch (fmt) {
         case 0b000:     // digit
             [code, zeroed] = await precessor(4);
@@ -1760,7 +1764,16 @@ class Processor {
             break;
         case 0b001:     // end/stop
             code = IOCodes.ioCodeStop;
-            await this.drum.ioWaitFor(Util.longLineSize);       // no digit precession
+            this.outputEndNonzero = false;
+            for (let x=0; x<Util.longLineSize && !this.canceledIO; ++x) {
+                // [END]OF and a one on M19 set OF1; a later CPU clear does
+                // not undo the observed one (F8k, dwg52).
+                if (this.OC.value != IOCodes.ioCmdTypeAR && this.drum.ioRead19()) {
+                    this.outputEndNonzero = true;
+                    this.drum.OF.value |= 4;
+                }
+                await this.drum.ioWaitFor(1);
+            }
             break;
         case 0b010:     // carriage return - precess and discard the sign bit
             [code, zeroed] = await precessor(1);
@@ -1802,351 +1815,159 @@ class Processor {
 
         await this.drum.ioWaitFor(Math.max(0, dataEnd-this.drum.drumTime));
         if (!this.canceledIO) {
+            this.slowOutputOE = 0;
             // F=T0·OE resets OD unless [RELOAD]OF sets it at the same F.
-            this.slowOutputODUntil = fmt == 0b101 ? Infinity : 0;
+            this.slowOutputODUntil = fmt == 0b101 || (fmt == 0b001 && this.outputEndNonzero) ? Infinity : 0;
         }
         return [code, zeroed];
     }
 
     /**************************************/
     async punchLine19() {
-        /* Punches the contents of line 19, starting with the four high-order
-        bits of of word 107, and precessing the line with each character until
-        the line is all zeroes. One character is output every two drum cycles.
-        The first cycle gets the format character; the second gets the data */
-        let code = 0;                   // output character code
-        let fmt = 0;                    // format code
-        let line19Empty = false;        // line 19 is now empty
-        let punching = true;            // true until STOP or I/O cancel
-        let reloadMZ = false;           // true if long-line -> MZ reload needed
-        let zeroed = false;             // precessor function reports line 19 all zeroes
-
-        this.OC.value = IOCodes.ioCmdPunch19;
-        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
-        this.activeIODevice = this.devices.paperTapePunch;
-        this.devices.paperTapePunch.makeBusy(true);
-        await this.drum.ioStart("PUNCH 19");
-
-        // Output an initial SPACE code (a quirk of the Slow-Out logic)
-        this.devices.paperTapePunch.write(IOCodes.ioCodeSpace);
-
-        // Start a MZ reload cycle.
-        do {
-            reloadMZ = true;
-
-            // The character cycle. Precessing the format code always starts at
-            // T0, but only takes 4 word-times. Precessing the data code from
-            // line 19 will always start at T0, which will finish the format
-            // code's drum  cycle, and itself will take a full drum cycle, so we
-            // are assured that each character cycle will take two drum cycles
-            // for proper timing.
-            do {
-                if (!this.canceledIO) {
-                    this.slowOutputNextF = this.drum.drumTime +
-                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                    if (reloadMZ) {
-                        reloadMZ = false;
-                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
-                        this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                        fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
-                    } else {
-                        fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
-                    }
-                }
-
-                if (!this.canceledIO) {
-                    this.OS.value = this.drum.ioDetect19Sign107();          // detect sign before precession
-                    [code, zeroed] = await this.formatOutputCharacter(fmt, this.boundIOPrecess19ToCode);
-                    if (zeroed) {
-                        line19Empty = true;
-                    }
-
-                    switch (code) {
-                    case IOCodes.ioCodeStop:
-                        if (line19Empty) {
-                            punching = false;
-                        } else {
-                            code = IOCodes.ioCodeReload;
-                            this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
-                            this.slowOutputODUntil = Infinity; // [RELOAD]OF·F sets OD
-                        }
-                        break;
-                    }
-                }
-
-                if (this.canceledIO) {
-                    punching = false;                                   // I/O canceled
-                } else {
-                    this.devices.paperTapePunch.write(code);
-                    // The following forces a format reload when a second PUNCH
-                    // 19 command is executed while a prior one is still in
-                    // progress. It is specifically intended to aid in punching
-                    // blank leader. See Technical Applications Memo 33.
-                    if (this.duplicateIO) {
-                        this.duplicateIO = false;
-                        code = IOCodes.ioCodeReload;                    // trigger a reload to restart the format
-                    }
-                }
-            } while (code != IOCodes.ioCodeReload && punching);
-        } while (punching);
-
-        this.drum.ioStop("PUNCH 19");
-        this.finishIO();
-        this.devices.paperTapePunch.makeBusy(false);
+        return this.runSlowOutput(IOCodes.ioCmdPunch19);
     }
 
     /**************************************/
     async typeAR() {
-        /* Types the contents of AR, starting with the four high-order bits of
-        the word, and precessing the word with each character.
-        One character is output every four drum cycles. One character is output
-        every four drum cycles: the first two are timing delays, one for format
-        code, one for data code */
-        let code = 0;                   // output character code
-        let fmt = 0;                    // format code
-        let printing = true;            // true until STOP or I/O cancel
-        let reloadMZ = false;           // true if long-line -> MZ reload needed
-        let suppressing = false;        // zero suppression in force
-        let zeroed = false;             // (ignored for AR typeout)
-
-        this.OC.value = IOCodes.ioCmdTypeAR;
-        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
-        this.activeIODevice = this.devices.typewriter;
-        await this.drum.ioStart("TYPE AR");
-
-        // Initial 1 drum-cycle delay, Typewriter only, see TOO drawing 55
-        await this.drum.ioWaitFor(Util.longLineSize);
-        if (!this.canceledIO) {
-            this.drum.OF.value |= 1;    // initial TYPE delay sets OF3 (dwg 55)
-        }
-
-        // Start a MZ reload cycle.
-        do {
-            reloadMZ = true;
-            suppressing = (this.punchSwitch != 1);                      // no zero-suppression if punch switch on
-
-            // The character cycle. Precessing the format code always starts at
-            // T0, but only takes 4 word-times. Precessing the data code from AR
-            // will always start at T0, which will finish the format code's drum
-            // cycle, and itself will take a full drum cycle. Finally, two extra
-            // extra drum cycles are needed to slow the output to typewriter
-            // speed, about 8.6 cps, so we are assured that each character cycle
-            // will take four drum cycles for proper timing.
-            do {
-                if (!this.canceledIO) {
-                    this.slowOutputNextF = this.drum.drumTime +
-                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                    if (reloadMZ) {
-                        reloadMZ = false;
-                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
-                        this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                        fmt = await this.drum.ioPrecessLongLineToMZ(3, 3);  // get initial format code for AR
-                    } else {
-                        fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
-                    }
-                }
-
-                if (!this.canceledIO) {
-                    this.OS.value = this.drum.AR.value & Util.wordSignMask; // detect sign before precession
-                    [code, zeroed] = await this.formatOutputCharacter(fmt, this.boundIOPrecessARToCode);
-                    // Unlike TYPE 19, TYPE AR is terminated by the first END format
-                    // code encountered, which causes no reload of the format to MZ.
-
-                    switch (code) {
-                    case IOCodes.ioDataMask:        // digit zero
-                        if (suppressing) {
-                            code = IOCodes.ioCodeSpace;
-                        }
-                        break;
-                    case IOCodes.ioCodeCR:
-                    case IOCodes.ioCodeTab:
-                    case IOCodes.ioCodeSpace:       // used for +sign
-                    case IOCodes.ioCodeMinus:
-                    case IOCodes.ioCodeWait:
-                        // any non-DIGIT format character resets OB5 (TOO dwg 52)
-                        suppressing = (this.punchSwitch != 1);      // establish suppression for next char
-                        break;
-                    case IOCodes.ioCodeReload:
-                        // does not affect suppression
-                        break;
-                    case IOCodes.ioCodeStop:
-                        printing = false;
-                        break;
-                    case IOCodes.ioCodePeriod:
-                        suppressing = false;
-                        break;
-                    default:                        // all non-zero digit codes turn off suppression
-                        suppressing = false;
-                        break;
-                    }
-                }
-
-                // Pause printing while the ENABLE switch is on
-                while (this.enableSwitch && !this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize);       // idle for a drum cycle
-                    if (!this.canceledIO) this.drum.OF.value |= 1; // TYPE delay still sets OF3
-                }
-
-                if (!this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize);
-                    if (!this.canceledIO) {
-                        this.drum.OF.value |= 1; // TYPE feedback delay sets OF3 (F8u)
-                        await this.drum.ioWaitFor(Util.longLineSize);
-                    }
-                }
-
-                if (this.canceledIO) {
-                    printing = false;           // I/O canceled
-                } else {
-                    this.devices.typewriter.write(code);
-                    if (this.punchSwitch == 1) {
-                        this.devices.paperTapePunch.write(code);
-                    }
-
-                    // The following forces a format reload when a second TYPE
-                    // AR command is executed while a prior one is in progress.
-                    if (this.duplicateIO) {
-                        this.duplicateIO = false;
-                        code = IOCodes.ioCodeReload;                    // trigger a reload to restart the format
-                    }
-                }
-            } while (code != IOCodes.ioCodeReload && printing);
-        } while (printing);
-
-        this.drum.ioStop("TYPE AR");
-        this.finishIO();
+        return this.runSlowOutput(IOCodes.ioCmdTypeAR);
     }
 
     /**************************************/
     async typeLine19() {
-        /* Types the contents of line 19, starting with the four high-order
-        bits of word 107, and precessing the line with each character until
-        the line is all zeroes. One character is output every four drum cycles:
-        the first two are timing delays, one for format code, one for data code */
-        let code = 0;                   // output character code
-        let fmt = 0;                    // format code
-        let line19Empty = false;        // line 19 is now all zeroes
-        let printing = true;            // true until STOP or I/O cancel
-        let reloadMZ = false;           // true if long line -> MZ reload needed
-        let suppressing = false;        // zero suppression in force
-        let zeroed = false;             // precessor function reports line 19 all zeroes
+        return this.runSlowOutput(IOCodes.ioCmdType19);
+    }
 
-        this.OC.value = IOCodes.ioCmdType19;
-        this.slowOutputODUntil = Infinity;              // DS·S2 sets OD (TOO F-8w)
-        this.activeIODevice = this.devices.typewriter;
-        await this.drum.ioStart("TYPE 19");
+    /**************************************/
+    async precessSlowOutputData(bits) {
+        /* OA is common to AR and M19. OC gates the selected source at each
+        word, so a busy 8->9/10 transition must not restart the data cycle. */
+        const d = this.drum;
+        const keepBits = Util.wordBits-bits;
+        const keepMask = Util.wordMask >>> bits;
+        let code = 0;
+        await d.ioWaitUntil(0);
+        for (let x=0; x<Util.longLineSize && !this.canceledIO; ++x) {
+            if (this.OC.value == IOCodes.ioCmdTypeAR) {
+                if (x == 0) {
+                    const word = d.AR.value;
+                    d.AR.value = (word & keepMask) << bits;
+                    code = word >>> keepBits;
+                }
+            } else {
+                const word = d.ioRead19();
+                d.ioWrite19(((word & keepMask) << bits) | code);
+                code = word >>> keepBits;
+            }
+            await d.ioWaitFor(1);
+        }
+        return [code, this.OC.value != IOCodes.ioCmdTypeAR && d.line[19].every(word => word == 0)];
+    }
 
-        // Initial 1 drum-cycle delay, Typewriter only, see TOO drawing 55
-        await this.drum.ioWaitFor(Util.longLineSize);
-        if (!this.canceledIO) {
-            this.drum.OF.value |= 1;    // initial TYPE delay sets OF3 (dwg 55)
+    /**************************************/
+    async fetchSlowOutputFormat() {
+        /* OG covers T2 of word00 through word03. Sample the OC/OD source
+        gates each word; OF's old contents feed back into the low end of MZ. */
+        const d = this.drum;
+        const keepMask = Util.wordMask >>> 3;
+        for (let x=0; x<Util.fastLineSize && !this.canceledIO; ++x) {
+            const reload = d.drumTime < this.slowOutputODUntil;
+            const source = reload ? d.line[this.OC.value == IOCodes.ioCmdTypeAR ? 3 : 2][x] : d.MZ[x];
+            const tail = x ? d.OF.value : (d.MZ[0] & 1) | (d.OF.value << 1);
+            d.MZ[x] = ((source & (x ? keepMask : keepMask & ~1)) << 3) | tail;
+            d.OF.value = source >>> 26;
+            await d.ioWaitFor(1);
+        }
+        return d.OF.value;
+    }
+
+    /**************************************/
+    async runSlowOutput(sCode) {
+        /* One existing-device controller follows G/OG (emit old OB, fetch
+        format), the data cycle, and F (load OB/reset OD). TYPE's intercycle
+        delay is qualified by OF3 and ENABLE. See TOO F8u-ad, dwgs52-55. */
+        const d = this.drum;
+        let bufferedCode = IOCodes.ioCodeSpace;
+        let suppressing = this.punchSwitch != 1;
+        let initial = true;
+        let unsupported = false;
+        this.OC.value = sCode;
+        this.slowOutputOE = 0;
+        this.slowOutputODUntil = Infinity;
+        this.activeIODevice = sCode == IOCodes.ioCmdPunch19 ? this.devices.paperTapePunch : this.devices.typewriter;
+        await d.ioStart("SLOW OUT");
+        await d.ioWaitUntil(0);
+        if (this.OC.value != IOCodes.ioCmdPunch19) {
+            // Ready retains OF3. At the first T0, old OF3 gates OY while
+            // TYPE·OYbar·OEbar·T0 sets OF3 for the following T0.
+            if (!(d.OF.value & 1)) {
+                d.OF.value |= 1;
+                await d.ioWaitFor(Util.longLineSize);
+            }
+            while (this.enableSwitch && !this.canceledIO && this.OC.value != IOCodes.ioCmdPunch19) {
+                await d.ioWaitFor(Util.longLineSize);
+            }
         }
 
-        // Start a MZ reload cycle.
-        do {
-            reloadMZ = true;
-            suppressing = (this.punchSwitch != 1);                      // no zero-suppression if punch switch on
-
-            // The character cycle. Precessing the format code always starts at
-            // T0, but only takes 4 word-times. Precessing the data code from 19
-            // will always start at T0, which will finish the format code's drum
-            // cycle, and itself will take a full drum cycle. Finally, two extra
-            // extra drum cycles are needed to slow the output to typewriter
-            // speed, about 8.6 cps, so we are assured that each character cycle
-            // will take four drum cycles for proper timing.
-            do {
-                if (!this.canceledIO) {
-                    this.slowOutputNextF = this.drum.drumTime +
-                            Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                    if (reloadMZ) {
-                        reloadMZ = false;
-                        // OD resets at F=T0·OE, after format AND data cycles (dwgs 52, 55).
-                        this.slowOutputODUntil = this.drum.drumTime +
-                                Drum.computeDrumCount(this.drum.L.value, 0) + 2*Util.longLineSize;
-                        fmt = await this.drum.ioPrecessLongLineToMZ(2, 3);  // get initial format code for line 19
-                    } else {
-                        fmt = await this.drum.ioPrecessMZToCode(3);         // get next 3-bit format code from MZ
-                    }
+        while (!this.canceledIO) {
+            if (this.OC.value < IOCodes.ioCmdTypeAR || this.OC.value > IOCodes.ioCmdPunch19) {
+                unsupported = true;
+                break;
+            }
+            const punching = this.OC.value == IOCodes.ioCmdPunch19;
+            this.activeIODevice = punching ? this.devices.paperTapePunch : this.devices.typewriter;
+            if (punching || this.punchSwitch == 1) {
+                this.devices.paperTapePunch.makeBusy(true);
+                this.devices.paperTapePunch.write(bufferedCode);
+            }
+            if (!punching && !initial && d.drumTime >= this.slowOutputODUntil) {
+                this.devices.typewriter.write(bufferedCode);
+            }
+            initial = false;
+            const stopping = bufferedCode == IOCodes.ioCodeStop;
+            this.slowOutputNextF = d.drumTime + 2*Util.longLineSize;
+            if (d.drumTime < this.slowOutputODUntil) this.slowOutputODUntil = this.slowOutputNextF;
+            const fmt = await this.fetchSlowOutputFormat();
+            if (this.canceledIO) break;
+            let [code, zeroed] = await this.formatOutputCharacter(fmt, this.precessSlowOutputData.bind(this));
+            if (this.canceledIO) break;
+            if (stopping) break;       // STOP in OB resets OC at F, after the extra format/data cycle
+            if (code == IOCodes.ioCodeStop && this.OC.value != IOCodes.ioCmdTypeAR &&
+                    (fmt == 0b001 ? this.outputEndNonzero : !zeroed)) {
+                code = IOCodes.ioCodeReload;
+                d.OF.value |= 4;
+                this.slowOutputODUntil = Infinity;
+            }
+            if (this.OC.value != IOCodes.ioCmdPunch19) {
+                if (code == IOCodes.ioDataMask && suppressing && this.punchSwitch != 1) {
+                    code = IOCodes.ioCodeSpace;
+                } else if (code & IOCodes.ioDataMask || code == IOCodes.ioCodePeriod) {
+                    suppressing = false;
+                } else if (code != IOCodes.ioCodeReload && code != IOCodes.ioCodeStop) {
+                    suppressing = this.punchSwitch != 1;
                 }
-
-                if (!this.canceledIO) {
-                    this.OS.value = this.drum.ioDetect19Sign107();
-                    [code, zeroed] = await this.formatOutputCharacter(fmt, this.boundIOPrecess19ToCode);
-                    if (zeroed) {
-                        line19Empty = true;
-                    }
-
-                    switch (code) {
-                    case IOCodes.ioDataMask:        // digit zero
-                        if (suppressing) {
-                            code = IOCodes.ioCodeSpace;
-                        }
-                        break;
-                    case IOCodes.ioCodeCR:
-                    case IOCodes.ioCodeTab:
-                    case IOCodes.ioCodeSpace:       // used for +sign
-                    case IOCodes.ioCodeMinus:
-                    case IOCodes.ioCodeWait:
-                        // any non-DIGIT format character resets OB5 (TOO dwg 52)
-                        suppressing = (this.punchSwitch != 1);      // establish suppression for next char
-                        break;
-                    case IOCodes.ioCodeReload:
-                        // does not affect suppression
-                        break;
-                    case IOCodes.ioCodeStop:
-                        if (line19Empty) {
-                            printing = false;
-                        } else {
-                            code = IOCodes.ioCodeReload;
-                            this.drum.OF.value |= 4; // END -> RELOAD sets OF1 (F8k)
-                            this.slowOutputODUntil = Infinity; // [RELOAD]OF·F sets OD
-                        }
-                        break;
-                    case IOCodes.ioCodePeriod:
-                        suppressing = false;
-                        break;
-                    default:                        // all non-zero digit codes turn off suppression
-                        suppressing = false;
-                        break;
-                    }
+            }
+            bufferedCode = code;
+            this.duplicateIO = false;
+            if (this.OC.value != IOCodes.ioCmdPunch19) {
+                const extraDelay = !(d.OF.value & 1);
+                await d.ioWaitFor(Util.longLineSize);
+                if (!this.canceledIO) d.OF.value |= 1;
+                if (extraDelay && this.OC.value != IOCodes.ioCmdPunch19 && !this.canceledIO) {
+                    await d.ioWaitFor(Util.longLineSize);
                 }
-
-                // Pause printing while the ENABLE switch is on
-                while (this.enableSwitch && !this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize);       // idle for a drum cycle
-                    if (!this.canceledIO) this.drum.OF.value |= 1; // TYPE delay still sets OF3
+                while (this.enableSwitch && !this.canceledIO && this.OC.value != IOCodes.ioCmdPunch19) {
+                    await d.ioWaitFor(Util.longLineSize);
                 }
-
-                if (!this.canceledIO) {
-                    await this.drum.ioWaitFor(Util.longLineSize);
-                    if (!this.canceledIO) {
-                        this.drum.OF.value |= 1; // TYPE feedback delay sets OF3 (F8u)
-                        await this.drum.ioWaitFor(Util.longLineSize);
-                    }
-                }
-
-                if (this.canceledIO) {
-                    printing = false;           // I/O canceled
-                } else {
-                    this.devices.typewriter.write(code);
-                    if (this.punchSwitch == 1) {
-                        this.devices.paperTapePunch.write(code);
-                    }
-
-                    // The following forces a format reload when a second TYPE
-                    // 19 command is executed while a prior one is in progress.
-                    if (this.duplicateIO) {
-                        this.duplicateIO = false;
-                        code = IOCodes.ioCodeReload;                    // trigger a reload to restart the format
-                    }
-                }
-            } while (code != IOCodes.ioCodeReload && printing);
-        } while (printing);
-
-        this.drum.ioStop("TYPE 19");
-        this.finishIO();
+            }
+        }
+        d.ioStop("SLOW OUT");
+        this.devices.paperTapePunch.makeBusy(false);
+        if (unsupported) {
+            this.hungIO = true;        // preserve the real OC; no new accessory implementation
+            this.warning(`Slow-output OC=${this.OC.value} selects an unsupported device`);
+        } else {
+            this.finishIO();
+        }
     }
 
     /**************************************/
@@ -2264,6 +2085,7 @@ class Processor {
         }
 
         this.slowOutputODUntil = 0;
+        this.slowOutputOE = 0;
         this.OC.value = IOCodes.ioCmdReady;     // set I/O Ready state
         this.drum.OF.value &= 0b101;     // READY resets OF2, not OF1/OF3 (dwg 52)
         this.AS.value = 0;
@@ -2307,6 +2129,18 @@ class Processor {
                 this.devices.typewriter.cancel();
                 this.readPaperTape();          // async -- one reader operation
             }
+            await this.transferDriver(this.transferNothing);
+            return;
+        }
+
+        // Slow-output commands set OC bits without restarting the G/F pipeline.
+        if (!this.canceledIO && this.OC.value >= IOCodes.ioCmdTypeAR &&
+                this.OC.value <= IOCodes.ioCmdPunch19 && sCode >= IOCodes.ioCmdTypeAR &&
+                sCode <= IOCodes.ioCmdPunch19) {
+            this.OC.value |= sCode;
+            this.slowOutputODUntil = this.slowOutputNextF > this.drum.drumTime ?
+                    this.slowOutputNextF : Infinity;
+            if (this.C1.value) this.AS.value = 1;
             await this.transferDriver(this.transferNothing);
             return;
         }
@@ -2357,11 +2191,11 @@ class Processor {
             if (this.OC.value != IOCodes.ioCmdReady &&
                     ((this.OC.value & 0b0011) || this.drum.drumTime < this.slowOutputODUntil)) {
                 this.setReadyPrecession = true;
-                // Unwind the old output wait before starting FAST-OUT at the
-                // next T0, rather than waiting for its character-cycle delay.
-                if (this.OC.value >= IOCodes.ioCmdTypeAR && this.OC.value <= IOCodes.ioCmdPunch19) {
-                    this.drum.ioCancel();
-                }
+            }
+            // OC reset with OD clear is immediately Ready (F9b); with OD set,
+            // the abandoned slow-output delay must not postpone FAST-OUT.
+            if (this.OC.value >= IOCodes.ioCmdTypeAR && this.OC.value <= IOCodes.ioCmdPunch19) {
+                this.drum.ioCancel();
             }
             this.cancelIO();
             break;

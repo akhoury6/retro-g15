@@ -46,7 +46,7 @@ for (const operation of ['typeAR','typeLine19','punchLine19']) {
             }
             assert.equal(p.OC.value,16,label);
             // Punch emits its documented initial SPACE; cancellation emits no data.
-            assert.equal(output.length,operation==='punchLine19'?(cancelAt>formatTime+216?2:1):0,label);
+            assert.equal(output.length,operation==='punchLine19'?(cancelAt<formatTime?0:cancelAt>formatTime+216?2:1):0,label);
             ++cases;
         }
     }
