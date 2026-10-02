@@ -1684,10 +1684,13 @@ class Processor {
             this.step();
             break;
         case -0x4D: case -0x6D:         // M - Mark place
-            // This is properly done at word-time 107, but the Processor
-            // should be stopped at this point, anyway.
-            this.drum.write(0, this.drum.CM.value ^ Util.wordMask);
-            this.drum.write(1, this.drum.read(regAR));
+            // Hardware waits for WORD107 (E-9, dwg59). CM's timing fields
+            // are static display values here, so first synchronize them with
+            // the effective registers, which Return Exit may have changed.
+            this.drum.CM.value = (this.drum.CM.value & 0b1_0000000_1_0000000_11_11111_11111_1) |
+                    ((~this.T.value & 0x7f) << 21) | ((~this.N.value & 0x7f) << 13);
+            this.drum.line[0][Util.longLineSize-1] = this.drum.CM.value ^ Util.wordMask;
+            this.drum.line[1][Util.longLineSize-1] = this.drum.AR.value;
             break;
         case -0x50: case -0x70:         // P - Start paper tape reader
             this.stop();
@@ -1707,16 +1710,22 @@ class Processor {
             }
             break;
         case -0x52: case -0x72:         // R - Return to marked place
-            // This is properly done at word-time 107, but the Processor
-            // should  be stopped at this point, anyway.
-            this.drum.CM.value = this.drum.read(0) ^ Util.wordMask;
-            this.drum.write(regAR, this.drum.read(1));
+            this.drum.CM.value = this.drum.line[0][Util.longLineSize-1] ^ Util.wordMask;
+            this.drum.AR.value = this.drum.line[1][Util.longLineSize-1];
+            // Unlike the hardware's dynamic CM, the emulator uses separate
+            // effective timing registers. Restore those as well as CM's lamp.
+            this.N.value = (~this.drum.CM.value >> 13) & 0x7f;
+            this.T.value = (~this.drum.CM.value >> 21) & 0x7f;
             break;
-        case -0x54: case -0x74:         // T - Copy command location to AR high-order bits
-            // See Theory of Operation, E-10c, p.67 for the weirdness.
-            this.drum.write(regAR,
-                (this.drum.read(regAR) & 0b0_0000000_1_1111111_11_11111_11111_1) |
-                ((this.drum.L.value < Util.longLineSize-1 ? this.N.value : 0b10010100) << 21));
+        case -0x54: case -0x74:         // T - Copy N to AR high-order bits
+            // E-10c and dwg59: the 94 indication means N=00, independently
+            // of the frozen emulator drum phase; the AR gates require READY.
+            if (this.OC.value == IOCodes.ioCmdReady) {
+                this.drum.AR.value = (this.drum.AR.value & 0x1fffff) |
+                        ((this.N.value == 0 ? 0x94 : this.N.value) << 21);
+            } else {
+                result = 1;
+            }
             break;
         case 0b10000:                   // 0 - Set command line
         case 0b10001:                   // 1
